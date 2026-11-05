@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildContextLine, buildConversationText, buildHintRule, buildOutputRule, buildReuseRule, formatDate, missMessage, parseModelResult, parseModelSegments, parseRefreshArgs, resolveTimeZone } from "../src/index.js";
+import { buildContextLine, buildConversationText, buildHintRule, buildOutputRule, buildReuseRule, formatDate, MAX_ERROR_LENGTH, missMessage, parseModelResult, parseModelSegments, parseRefreshArgs, resolveTimeZone, responseError } from "../src/index.js";
 
 test("formats dates in the requested timezone", () => {
   assert.equal(formatDate("2026-03-11T00:30:00.000Z", "America/Los_Angeles"), "0310");
@@ -109,7 +109,18 @@ test("explains each miss reason instead of blaming context", () => {
   assert.match(missMessage("NO_CONTEXT"), /no conversation content/i);
   assert.match(missMessage("EMPTY"), /returned no text/i);
   assert.match(missMessage("SKIP"), /add an instruction/i);
+  assert.match(missMessage("ERROR", "Provider finish_reason: content_filter"), /content_filter/);
+  assert.match(missMessage("ERROR"), /failed/i);
   assert.match(missMessage(null), /No valid session name/);
+});
+
+test("surfaces provider errors instead of calling them an empty response", () => {
+  assert.equal(responseError({ stopReason: "stop" }), undefined);
+  assert.equal(responseError({ stopReason: "error", errorMessage: " 429 too many requests \n" }), "429 too many requests");
+  assert.match(responseError({ stopReason: "error" }) ?? "", /error/);
+  assert.match(responseError({ stopReason: "aborted" }) ?? "", /aborted/);
+  const long = "x".repeat(MAX_ERROR_LENGTH + 50);
+  assert.equal(responseError({ stopReason: "error", errorMessage: long })?.length, MAX_ERROR_LENGTH);
 });
 
 test("parses refresh command arguments", () => {

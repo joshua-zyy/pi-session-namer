@@ -28,8 +28,9 @@ export type Config = {
 };
 export type NameHistory = { name: string; source: "auto" | "manual"; reason: string; updatedAt: string };
 export type NameSegments = { type: string; topic: string; progress?: string };
-// 四种结果分开表达，避免把“模型没吐字”和“模型主动放弃”混成同一句提示。
-export type ModelResult = "SKIP" | "EMPTY" | "NO_CONTEXT" | NameSegments;
+// 失败原因分开表达，避免把“provider 报错”“模型没吐字”“模型主动放弃”混成同一句提示。
+export type ModelFailure = "SKIP" | "EMPTY" | "NO_CONTEXT" | "ERROR";
+export type ModelResult = ModelFailure | NameSegments;
 export type State = { version: 1; autoName?: string; segments?: NameSegments; manualLock: boolean; date: string; timeZone: string; turnsSinceCheck: number; history: NameHistory[] };
 let configWarning: string | undefined;
 
@@ -247,9 +248,20 @@ export function buildOutputRule(manual: boolean, wantsProgress: boolean): string
     : `- Output ${shape}; output SKIP only if there is no clear task.`;
 }
 
+export const MAX_ERROR_LENGTH = 300;
+
+// provider 报错时 complete() 不抛异常，而是返回 stopReason=error 的空消息（例如 401、429、
+// content_filter）。先把它识别出来，否则会被当成“模型没返回文本”。
+export function responseError(response: { stopReason?: string; errorMessage?: string }): string | undefined {
+  if (response.stopReason !== "error" && response.stopReason !== "aborted") return undefined;
+  const detail = (response.errorMessage ?? "").replace(/\s+/g, " ").trim();
+  return (detail || `the provider stopped with "${response.stopReason}"`).slice(0, MAX_ERROR_LENGTH);
+}
+
 // 手动刷新落空时按原因给不同提示，避免所有失败都显示“上下文不足”。
-export function missMessage(result: ModelResult | null): string {
+export function missMessage(result: ModelResult | null, errorMessage?: string): string {
   if (result === "NO_CONTEXT") return "There is no conversation content to analyze yet.";
+  if (result === "ERROR") return `The naming request failed: ${errorMessage || "the provider returned an error without details"}.`;
   if (result === "EMPTY") return "The naming model returned no text. Try again, or add an instruction: /session-name-refresh <requirement>.";
   if (result === "SKIP") return "The naming model did not pick a main task. Add an instruction: /session-name-refresh <requirement>.";
   return "No valid session name was generated.";
@@ -286,18 +298,22 @@ function thinkingOptions(model: { api: string; reasoning: boolean; thinkingLevel
   return {};
 }
 
-async function generate(pi: ExtensionAPI, ctx: ExtensionContext, config: Config, state: State, options: RunOptions = {}): Promise<ModelResult | null> {
+export type GenerateOutcome = { result: ModelResult | null; errorMessage?: string };
+
+async function generate(pi: ExtensionAPI, ctx: ExtensionContext, config: Config, state: State, options: RunOptions = {}): Promise<GenerateOutcome> {
   const selection = modelFor(ctx, config);
   const model = selection.model;
-  if (!model) return null;
+  if (!model) return { result: null };
   const conversation = buildConversationText(ctx.sessionManager.getBranch() as Entry[]);
-  if (!conversation) return "NO_CONTEXT";
+  if (!conversation) return { result: "NO_CONTEXT" };
   const configuredLevel = config.thinkingLevel === "inherit" ? (ctx.thinkingLevel ?? "off") : config.thinkingLevel;
   const requestOptions = { sessionId: uuidv7(), cacheRetention: "none" as const, ...thinkingOptions(model, configuredLevel) };
   const contextLine = buildContextLine(Boolean(options.force), state.segments, pi.getSessionName() ?? state.autoName ?? "(unnamed)");
   const response = await ctx.modelRegistry.complete(model, { messages: [{ role: "user", content: [{ type: "text", text: promptFor(state, contextLine, conversation, config, options) }], timestamp: Date.now() }] }, requestOptions as never);
+  const failure = responseError(response);
+  if (failure) return { result: "ERROR", errorMessage: failure };
   const text = response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
-  return parseModelSegments(text, config.nameFormat.includes("{progress}"));
+  return { result: parseModelSegments(text, config.nameFormat.includes("{progress}")) };
 }
 
 export default function sessionNamer(pi: ExtensionAPI) {
@@ -327,7 +343,8 @@ export default function sessionNamer(pi: ExtensionAPI) {
     running = true;
     if (!manual) attempts++;
     try {
-      const result = await generate(pi, ctx, config, current, { ...options, manual });
+      const outcome = await generate(pi, ctx, config, current, { ...options, manual });
+      const result = outcome.result;
       const next = { ...current, turnsSinceCheck: 0, history: [...current.history] };
       if (result && typeof result !== "string") {
         const prev = current.segments;
@@ -356,7 +373,7 @@ export default function sessionNamer(pi: ExtensionAPI) {
         if (result === "SKIP") attempts = 0;
         turns = 0;
         persist(next);
-        if (manual) notify(ctx, missMessage(result), "warning");
+        if (manual) notify(ctx, missMessage(result, outcome.errorMessage), "warning");
       }
     } catch (error) { if (manual) notify(ctx, `Session naming failed: ${error instanceof Error ? error.message : String(error)}`, "error"); }
     finally { running = false; }

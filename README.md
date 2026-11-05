@@ -130,7 +130,7 @@ Type｜Topic
 - `SKIP` leaves an unnamed session unnamed, or leaves the current name unchanged. It is honored only during automatic checks; a manual refresh always produces a name.
 - `Type｜Topic` is combined with the program-generated session date.
 
-If a manual refresh cannot produce a name, the notice states why: no conversation content, an empty model response, or a model that declined to pick a task.
+If a manual refresh cannot produce a name, the notice states why: no conversation content, a provider error (with the provider's own message), an empty model response, or a model that declined to pick a task.
 
 The semantic type categories default to Feature, Design, Fix, Optimization, Release, Exploration, Documentation, and Research. The model expresses the selected category in the naming language; you can customize the list via the `types` config.
 
