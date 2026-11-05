@@ -207,7 +207,7 @@ Feature、Design、Fix、Optimization、Release、Exploration、Documentation、
 
 | 命令 | 行为 |
 |---|---|
-| `/session-name-refresh` | 立即分析当前上下文；锁定时提示先 unlock；成功更新或 KEEP/SKIP 都反馈结果 |
+| `/session-name-refresh [force] [instruction]` | 立即分析当前上下文；`force` 前缀强制重评类型与主题，其余文本作为附加要求注入提示词；锁定时提示先 unlock；成功更新或 SKIP 都反馈结果 |
 | `/session-name-lock` | 锁定当前已有名称；没有名称时提示，不调用模型 |
 | `/session-name-unlock` | 解除锁定并保留旧名称；不调用模型，需要时再执行 refresh |
 | `/session-name-status` | 显示当前名称、锁定状态、下次周期检查轮次 |

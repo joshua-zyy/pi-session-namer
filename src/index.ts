@@ -150,6 +150,23 @@ export function parseModelSegments(raw: string, wantsProgress: boolean): ModelRe
   return { type, topic, progress };
 }
 
+export type RefreshArgs = { force: boolean; hint?: string };
+export const MAX_HINT_LENGTH = 200;
+
+// 附加要求折成单行并限长，避免换行和粘贴的长文本撑爆提示词结构。
+function normalizeHint(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, MAX_HINT_LENGTH);
+}
+
+// 命令参数：空 → 普通刷新；`force` 前缀或任意文本 → 强制重评，剩余文本作为附加要求。
+export function parseRefreshArgs(args: string): RefreshArgs {
+  const trimmed = args.trim();
+  if (!trimmed) return { force: false };
+  const forced = trimmed.match(/^force(?![a-z0-9])[:\s]*([\s\S]*)$/i);
+  const hint = normalizeHint(forced ? forced[1] : trimmed);
+  return hint ? { force: true, hint } : { force: true };
+}
+
 export function renderName(nameFormat: string, parts: { date: string; type: string; topic: string; progress?: string }): string {
   return cleanupName(nameFormat
     .replace(/\{date\}/g, parts.date)
@@ -203,7 +220,27 @@ function modelFor(ctx: ExtensionContext, config: Config): { model: typeof ctx.mo
   return { model: ctx.model && ctx.modelRegistry.hasConfiguredAuth(ctx.model) ? ctx.model : undefined, fellBack: false };
 }
 
-function promptFor(state: State, contextLine: string, conversation: string, config: Config): string {
+// 强制重评时不回灌旧的 type/topic，否则模型会顺着旧值照抄，等于白 force。
+export function buildContextLine(force: boolean, segments: NameSegments | undefined, currentName: string): string {
+  if (force) return `Current name: ${currentName}. The user requested a forced re-evaluation: re-assess the type and topic from the conversation instead of copying the current name.`;
+  if (segments) return `Current type and topic (reuse them EXACTLY as written if they still describe the main task): ${segments.type}｜${segments.topic}`;
+  return `Current name: ${currentName}`;
+}
+
+export function buildReuseRule(force: boolean, wantsProgress: boolean): string {
+  if (force) return "- Re-assess the type and topic from scratch. Keep the previous wording only when it is still the most accurate description of the current main task.";
+  return wantsProgress
+    ? "- If the current name's type and topic still describe the main task, reuse them EXACTLY as written; only the progress may change."
+    : "- If the current name's type and topic still describe the main task, output them EXACTLY as written.";
+}
+
+export function buildHintRule(hint?: string): string {
+  return hint ? `\n- Additional user requirement (highest priority, as long as the output format is respected): ${hint}` : "";
+}
+
+type RunOptions = { force?: boolean; hint?: string };
+
+function promptFor(state: State, contextLine: string, conversation: string, config: Config, options: RunOptions = {}): string {
   const wantsProgress = config.nameFormat.includes("{progress}");
   const languageRule = config.nameLanguage === "auto"
     ? "Use the primary language of the conversation for the type, topic, and progress."
@@ -211,13 +248,11 @@ function promptFor(state: State, contextLine: string, conversation: string, conf
   const outputRule = wantsProgress
     ? '- Output "Type｜Topic｜Progress"; output SKIP only if there is no clear task.'
     : '- Output "Type｜Topic"; output SKIP only if there is no clear task.';
-  const reuseRule = wantsProgress
-    ? "- If the current name's type and topic still describe the main task, reuse them EXACTLY as written; only the progress may change."
-    : "- If the current name's type and topic still describe the main task, output them EXACTLY as written.";
+  const reuseRule = buildReuseRule(Boolean(options.force), wantsProgress);
   const progressRules = wantsProgress
     ? `\n- Progress states the latest status of the main task (e.g. "published 0.1.1", "fix verified", "待审查"), at most 16 characters. Anchor it to the latest evidence near the END of the conversation; never report an earlier phase when a later milestone has already been reached.`
     : "";
-  return `You are Pi's session naming assistant. Describe what this session is working on and its latest state.\n\nOutput rules:\n${outputRule}\n${reuseRule}\n- Type must be one of: ${config.types.join(", ")}, or an equivalent label in the naming language.\n- Topic is concise and specific, suitable for a sidebar.\n${languageRule}\n- No project name, file paths, dates, explanations, quotes, or Markdown.${progressRules}\n- The program will apply the date and the name format: ${config.nameFormat}.\n\n${contextLine}\n\n<conversation>\n${conversation}\n</conversation>`;
+  return `You are Pi's session naming assistant. Describe what this session is working on and its latest state.\n\nOutput rules:\n${outputRule}\n${reuseRule}\n- Type must be one of: ${config.types.join(", ")}, or an equivalent label in the naming language.\n- Topic is concise and specific, suitable for a sidebar.\n${languageRule}\n- No project name, file paths, dates, explanations, quotes, or Markdown.${progressRules}\n- The program will apply the date and the name format: ${config.nameFormat}.${buildHintRule(options.hint)}\n\n${contextLine}\n\n<conversation>\n${conversation}\n</conversation>`;
 }
 
 function thinkingOptions(model: { api: string; reasoning: boolean; thinkingLevelMap?: Partial<Record<string, string | null>> }, level: ThinkingLevel): Record<string, unknown> {
@@ -236,18 +271,16 @@ function thinkingOptions(model: { api: string; reasoning: boolean; thinkingLevel
   return {};
 }
 
-async function generate(pi: ExtensionAPI, ctx: ExtensionContext, config: Config, state: State): Promise<ModelResult | null> {
+async function generate(pi: ExtensionAPI, ctx: ExtensionContext, config: Config, state: State, options: RunOptions = {}): Promise<ModelResult | null> {
   const selection = modelFor(ctx, config);
   const model = selection.model;
   if (!model) return null;
   const conversation = buildConversationText(ctx.sessionManager.getBranch() as Entry[]);
   if (!conversation) return "SKIP";
   const configuredLevel = config.thinkingLevel === "inherit" ? (ctx.thinkingLevel ?? "off") : config.thinkingLevel;
-  const options = { sessionId: uuidv7(), cacheRetention: "none" as const, ...thinkingOptions(model, configuredLevel) };
-  const contextLine = state.segments
-    ? `Current type and topic (reuse them EXACTLY as written if they still describe the main task): ${state.segments.type}｜${state.segments.topic}`
-    : `Current name: ${pi.getSessionName() ?? state.autoName ?? "(unnamed)"}`;
-  const response = await ctx.modelRegistry.complete(model, { messages: [{ role: "user", content: [{ type: "text", text: promptFor(state, contextLine, conversation, config) }], timestamp: Date.now() }] }, options as never);
+  const requestOptions = { sessionId: uuidv7(), cacheRetention: "none" as const, ...thinkingOptions(model, configuredLevel) };
+  const contextLine = buildContextLine(Boolean(options.force), state.segments, pi.getSessionName() ?? state.autoName ?? "(unnamed)");
+  const response = await ctx.modelRegistry.complete(model, { messages: [{ role: "user", content: [{ type: "text", text: promptFor(state, contextLine, conversation, config, options) }], timestamp: Date.now() }] }, requestOptions as never);
   const text = response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
   return parseModelSegments(text, config.nameFormat.includes("{progress}"));
 }
@@ -265,7 +298,7 @@ export default function sessionNamer(pi: ExtensionAPI) {
   const ensureState = (ctx: ExtensionContext) => { state ??= latestState(ctx) ?? defaultState(ctx, config); return state; };
   const persist = (next: State) => { state = next; appendState(pi, next); };
 
-  const run = async (ctx: ExtensionContext, reason: string, manual = false) => {
+  const run = async (ctx: ExtensionContext, reason: string, manual = false, options: RunOptions = {}) => {
     const current = ensureState(ctx);
     if (!manual && !ctx.sessionManager.getSessionFile()) return;
     if (config.model !== "inherit") {
@@ -279,7 +312,7 @@ export default function sessionNamer(pi: ExtensionAPI) {
     running = true;
     if (!manual) attempts++;
     try {
-      const result = await generate(pi, ctx, config, current);
+      const result = await generate(pi, ctx, config, current, options);
       const next = { ...current, turnsSinceCheck: 0, history: [...current.history] };
       if (result && result !== "SKIP") {
         const prev = current.segments;
@@ -347,10 +380,19 @@ export default function sessionNamer(pi: ExtensionAPI) {
     } else persist({ ...current, turnsSinceCheck: turns });
   });
 
-  pi.registerCommand("session-name-refresh", { description: "Refresh the session name from the current conversation", handler: async (_args, ctx) => {
-    notify(ctx, "Analyzing the current session to refresh its name…", "info");
-    await run(ctx, "refresh", true);
-  } });
+  pi.registerCommand("session-name-refresh", {
+    description: "Refresh the session name (usage: /session-name-refresh [force] [instruction])",
+    getArgumentCompletions: (prefix) => {
+      const value = prefix.trimStart().toLowerCase();
+      if (value !== "" && !"force ".startsWith(value)) return null;
+      return [{ value: "force ", label: "force", description: "Re-evaluate type and topic instead of reusing them" }];
+    },
+    handler: async (args, ctx) => {
+      const { force, hint } = parseRefreshArgs(args);
+      notify(ctx, force ? "Forcing a re-evaluation of the session name…" : "Analyzing the current session to refresh its name…", "info");
+      await run(ctx, "refresh", true, { force, hint });
+    }
+  });
   pi.registerCommand("session-name-lock", { description: "Lock the current session name", handler: async (_args, ctx) => {
     const current = ensureState(ctx);
     if (!pi.getSessionName()) return notify(ctx, "There is no session name to lock.", "warning");

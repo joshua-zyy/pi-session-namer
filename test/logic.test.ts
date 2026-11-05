@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildConversationText, formatDate, parseModelResult, parseModelSegments, resolveTimeZone } from "../src/index.js";
+import { buildContextLine, buildConversationText, buildHintRule, buildReuseRule, formatDate, parseModelResult, parseModelSegments, parseRefreshArgs, resolveTimeZone } from "../src/index.js";
 
 test("formats dates in the requested timezone", () => {
   assert.equal(formatDate("2026-03-11T00:30:00.000Z", "America/Los_Angeles"), "0310");
@@ -91,4 +91,41 @@ test("parses model segments for diff-based change detection", () => {
   }
   assert.equal(parseModelSegments("SKIP", true), "SKIP");
   assert.equal(parseModelSegments("随便猜一个", true), null);
+});
+
+test("parses refresh command arguments", () => {
+  assert.deepEqual(parseRefreshArgs(""), { force: false });
+  assert.deepEqual(parseRefreshArgs("   "), { force: false });
+  assert.deepEqual(parseRefreshArgs("force"), { force: true });
+  assert.deepEqual(parseRefreshArgs("FORCE"), { force: true });
+  assert.deepEqual(parseRefreshArgs("force:"), { force: true });
+  assert.deepEqual(parseRefreshArgs("force 类型用中文"), { force: true, hint: "类型用中文" });
+  assert.deepEqual(parseRefreshArgs("force: 用英文"), { force: true, hint: "用英文" });
+  // 任意其他文本也强制重评，并作为附加要求注入。
+  assert.deepEqual(parseRefreshArgs("主题别用文件名"), { force: true, hint: "主题别用文件名" });
+  // "forces" 不是关键字，整段文本作为要求。
+  assert.deepEqual(parseRefreshArgs("forces x"), { force: true, hint: "forces x" });
+  assert.deepEqual(parseRefreshArgs("force\n  类型  用\n中文"), { force: true, hint: "类型 用 中文" });
+  assert.equal(parseRefreshArgs(`force ${"x".repeat(300)}`).hint?.length, 200);
+});
+
+test("builds a force context line without feeding back the old segments", () => {
+  const segments = { type: "Fix", topic: "OAuth callback errors", progress: "testing" };
+  const forced = buildContextLine(true, segments, "0310｜Fix｜OAuth callback errors｜testing");
+  assert.ok(forced.includes("forced re-evaluation"));
+  assert.ok(!forced.includes("reuse them EXACTLY"));
+  const reused = buildContextLine(false, segments, "ignored");
+  assert.ok(reused.includes("reuse them EXACTLY"));
+  assert.ok(reused.includes("Fix｜OAuth callback errors"));
+  assert.ok(buildContextLine(false, undefined, "0310｜Fix｜OAuth callback errors").startsWith("Current name:"));
+});
+
+test("builds the reuse and hint rules", () => {
+  assert.ok(buildReuseRule(true, true).includes("from scratch"));
+  assert.ok(buildReuseRule(true, false).includes("from scratch"));
+  assert.ok(buildReuseRule(false, true).includes("only the progress may change"));
+  assert.ok(buildReuseRule(false, false).includes("output them EXACTLY as written"));
+  assert.equal(buildHintRule(), "");
+  assert.ok(buildHintRule("类型用中文").includes("highest priority"));
+  assert.ok(buildHintRule("类型用中文").includes("类型用中文"));
 });

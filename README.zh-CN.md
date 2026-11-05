@@ -66,6 +66,8 @@ pi install git:github.com/joshua-zyy/pi-session-namer
 | 命令 | 行为 |
 | --- | --- |
 | `/session-name-refresh` | 分析当前对话，并在适当时更新名称。会显示开始提示和完成结果，不会绕过锁定。 |
+| `/session-name-refresh force` | 强制重新评估类型和主题，而不是复用当前值。 |
+| `/session-name-refresh <要求>` | 强制重新评估，并把该文本作为附加要求注入提示词；也可写成 `force <要求>`。 |
 | `/session-name-lock` | 锁定当前名称，不调用模型。 |
 | `/session-name-unlock` | 解除自动命名锁定，不调用模型，也不会自动刷新名称；需要时再执行 `/session-name-refresh`。 |
 | `/session-name-status` | 显示当前名称、锁定状态和下一次周期检查状态。 |
@@ -129,12 +131,10 @@ off, minimal, low, medium, high, xhigh, max, inherit
 命名模型只允许返回以下结果之一：
 
 ```text
-KEEP
 SKIP
 类型｜主题
 ```
 
-- `KEEP`：保留当前名称。
 - `SKIP`：未命名 session 继续保持未命名；已有名称保持不变。
 - `类型｜主题`：插件会为其补充程序确定的 session 日期。
 
@@ -149,6 +149,8 @@ SKIP
 当名称格式包含 `{progress}` 时，模型还会输出简短的进度状态（最多 16 字符），以对话末尾的最新证据为准。可选的进度段展示任务当前进展，让用户不仅能认出会话在做什么，还能想起进行到哪里了。
 
 提示词要求模型在普通进展时保持原名称，只有主要任务发生明显变化时才更新名称。
+
+普通 refresh 允许复用原有类型和主题；加上 `force`（或直接跟一段文字）会强制重新评估类型和主题，可以附带自己的要求（例如 `/session-name-refresh force 类型用中文`）。附加要求以最高优先级注入提示词，但不能突破输出格式和类型白名单，也不会绕过锁定。
 
 命名上下文仅包含当前 session 文本、压缩摘要和工具名称，不发送工具参数和工具结果。插件不做额外敏感信息脱敏，请根据隐私要求选择 provider。
 

@@ -62,6 +62,8 @@ Restart Pi or run `/reload` after installation or source changes.
 | Command | Behavior |
 | --- | --- |
 | `/session-name-refresh` | Analyze the current conversation and update the name when appropriate. Shows a start message and a result. Does not bypass a lock. |
+| `/session-name-refresh force` | Force a re-evaluation of the type and topic instead of reusing them. |
+| `/session-name-refresh <instruction>` | Force a re-evaluation and inject the text as an additional requirement; `force <instruction>` works too. |
 | `/session-name-lock` | Lock the current name. Does not call a model. |
 | `/session-name-unlock` | Unlock automatic naming. Does not call a model or refresh the name. Run `/session-name-refresh` separately when needed. |
 | `/session-name-status` | Show the current name, lock state, and next periodic-check status. |
@@ -121,12 +123,10 @@ off, minimal, low, medium, high, xhigh, max, inherit
 The naming model may return only one of:
 
 ```text
-KEEP
 SKIP
 Type｜Topic
 ```
 
-- `KEEP` keeps the current name.
 - `SKIP` leaves an unnamed session unnamed, or leaves the current name unchanged.
 - `Type｜Topic` is combined with the program-generated session date.
 
@@ -141,6 +141,8 @@ The naming model always describes the task with segments; the extension itself d
 When the name format contains `{progress}`, the model also outputs a short progress status (at most 16 characters) anchored to the latest evidence in the conversation. The optional progress segment shows where the task currently stands, so you can recall not only what a session is about but also how far it has gone.
 
 The prompt asks the model to keep the same name for ordinary progress and only rename when the main task changes substantially.
+
+A plain refresh may reuse the existing type and topic; adding `force` (or any other text) re-evaluates them from scratch and can carry your own requirement, for example `/session-name-refresh force write the type in Chinese`. The requirement is injected with the highest priority, but it cannot override the output format or the type whitelist, and it never bypasses a lock.
 
 Naming context is limited to current session text, compaction summaries, and tool names. Tool arguments and tool results are not sent. The extension does not perform additional sensitive-data redaction; choose a provider according to your privacy requirements.
 
