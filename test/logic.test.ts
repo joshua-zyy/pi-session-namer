@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildContextLine, buildConversationText, buildHintRule, buildReuseRule, formatDate, parseModelResult, parseModelSegments, parseRefreshArgs, resolveTimeZone } from "../src/index.js";
+import { buildContextLine, buildConversationText, buildHintRule, buildOutputRule, buildReuseRule, formatDate, missMessage, parseModelResult, parseModelSegments, parseRefreshArgs, resolveTimeZone } from "../src/index.js";
 
 test("formats dates in the requested timezone", () => {
   assert.equal(formatDate("2026-03-11T00:30:00.000Z", "America/Los_Angeles"), "0310");
@@ -63,7 +63,9 @@ test("falls back for an invalid timezone", () => {
 
 test("parses model control responses", () => {
   assert.equal(parseModelResult("SKIP", "0310"), "SKIP");
-  assert.equal(parseModelResult("", "0310"), "SKIP");
+  // 空输出是“模型没吐字”，不是“上下文不足”。
+  assert.equal(parseModelResult("", "0310"), "EMPTY");
+  assert.equal(parseModelResult("  \n\t ", "0310"), "EMPTY");
   assert.equal(parseModelResult("KEEP", "0310"), null);
   assert.equal(parseModelResult("修复｜OAuth 回调错误", "0310"), "0310｜修复｜OAuth 回调错误");
   assert.equal(parseModelResult("Research｜GitHub skills discovery｜published 0.1.1", "0310"), "0310｜Research｜GitHub skills discovery｜published 0.1.1");
@@ -90,7 +92,24 @@ test("parses model segments for diff-based change detection", () => {
     assert.equal(a.type === b.type && a.topic === b.topic && a.progress !== b.progress, true);
   }
   assert.equal(parseModelSegments("SKIP", true), "SKIP");
+  assert.equal(parseModelSegments("", true), "EMPTY");
   assert.equal(parseModelSegments("随便猜一个", true), null);
+});
+
+test("manual refresh tells the model to always produce a name", () => {
+  const manual = buildOutputRule(true, true);
+  assert.ok(manual.includes("Never output SKIP"));
+  assert.ok(manual.includes('"Type｜Topic｜Progress"'));
+  const automatic = buildOutputRule(false, false);
+  assert.ok(automatic.includes("SKIP only if there is no clear task"));
+  assert.ok(automatic.includes('"Type｜Topic"'));
+});
+
+test("explains each miss reason instead of blaming context", () => {
+  assert.match(missMessage("NO_CONTEXT"), /no conversation content/i);
+  assert.match(missMessage("EMPTY"), /returned no text/i);
+  assert.match(missMessage("SKIP"), /add an instruction/i);
+  assert.match(missMessage(null), /No valid session name/);
 });
 
 test("parses refresh command arguments", () => {

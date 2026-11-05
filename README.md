@@ -61,7 +61,7 @@ Restart Pi or run `/reload` after installation or source changes.
 
 | Command | Behavior |
 | --- | --- |
-| `/session-name-refresh` | Analyze the current conversation and update the name when appropriate. Shows a start message and a result. Does not bypass a lock. |
+| `/session-name-refresh` | Analyze the current conversation and update the name. A manual refresh always produces a name when there is conversation content; `SKIP` is reserved for automatic checks. Shows a start message and a result. Does not bypass a lock. |
 | `/session-name-refresh force` | Force a re-evaluation of the type and topic instead of reusing them. |
 | `/session-name-refresh <instruction>` | Force a re-evaluation and inject the text as an additional requirement; `force <instruction>` works too. |
 | `/session-name-lock` | Lock the current name. Does not call a model. |
@@ -127,8 +127,10 @@ SKIP
 Type｜Topic
 ```
 
-- `SKIP` leaves an unnamed session unnamed, or leaves the current name unchanged.
+- `SKIP` leaves an unnamed session unnamed, or leaves the current name unchanged. It is honored only during automatic checks; a manual refresh always produces a name.
 - `Type｜Topic` is combined with the program-generated session date.
+
+If a manual refresh cannot produce a name, the notice states why: no conversation content, an empty model response, or a model that declined to pick a task.
 
 The semantic type categories default to Feature, Design, Fix, Optimization, Release, Exploration, Documentation, and Research. The model expresses the selected category in the naming language; you can customize the list via the `types` config.
 

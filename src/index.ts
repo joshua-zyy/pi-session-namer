@@ -28,7 +28,8 @@ export type Config = {
 };
 export type NameHistory = { name: string; source: "auto" | "manual"; reason: string; updatedAt: string };
 export type NameSegments = { type: string; topic: string; progress?: string };
-export type ModelResult = "SKIP" | NameSegments;
+// 四种结果分开表达，避免把“模型没吐字”和“模型主动放弃”混成同一句提示。
+export type ModelResult = "SKIP" | "EMPTY" | "NO_CONTEXT" | NameSegments;
 export type State = { version: 1; autoName?: string; segments?: NameSegments; manualLock: boolean; date: string; timeZone: string; turnsSinceCheck: number; history: NameHistory[] };
 let configWarning: string | undefined;
 
@@ -127,7 +128,8 @@ export function buildConversationText(entries: Entry[], maxMessages = 12, maxCha
 export function parseModelSegments(raw: string, wantsProgress: boolean): ModelResult | null {
   let value = raw.trim().replace(/^```\w*\s*/i, "").replace(/```\s*$/i, "").trim();
   value = value.split("\n").map((line) => line.trim()).find(Boolean) ?? "";
-  if (/^SKIP$/i.test(value) || !value) return "SKIP";
+  if (!value) return "EMPTY";
+  if (/^SKIP$/i.test(value)) return "SKIP";
   const two = value.match(/^([^｜|]{1,24})[｜|](.+)$/);
   if (!two || !two[1].trim()) return null;
   const type = two[1].trim();
@@ -183,10 +185,9 @@ function cleanupName(name: string): string {
     .trim();
 }
 
-export function parseModelResult(raw: string, date: string, nameFormat: string = DEFAULT_CONFIG.nameFormat): "SKIP" | string | null {
+export function parseModelResult(raw: string, date: string, nameFormat: string = DEFAULT_CONFIG.nameFormat): string | null {
   const segments = parseModelSegments(raw, nameFormat.includes("{progress}"));
-  if (segments === null) return null;
-  if (segments === "SKIP") return "SKIP";
+  if (segments === null || typeof segments === "string") return segments;
   return renderName(nameFormat, { date, ...segments }) || null;
 }
 
@@ -238,16 +239,30 @@ export function buildHintRule(hint?: string): string {
   return hint ? `\n- Additional user requirement (highest priority, as long as the output format is respected): ${hint}` : "";
 }
 
-type RunOptions = { force?: boolean; hint?: string };
+// 手动刷新是用户明确下令，模型不该再回 SKIP；证据不足也要给最可能的主线任务。
+export function buildOutputRule(manual: boolean, wantsProgress: boolean): string {
+  const shape = wantsProgress ? '"Type｜Topic｜Progress"' : '"Type｜Topic"';
+  return manual
+    ? `- Output ${shape}. The user explicitly requested a refresh: always name the most likely main task, even if the evidence is thin. Never output SKIP.`
+    : `- Output ${shape}; output SKIP only if there is no clear task.`;
+}
+
+// 手动刷新落空时按原因给不同提示，避免所有失败都显示“上下文不足”。
+export function missMessage(result: ModelResult | null): string {
+  if (result === "NO_CONTEXT") return "There is no conversation content to analyze yet.";
+  if (result === "EMPTY") return "The naming model returned no text. Try again, or add an instruction: /session-name-refresh <requirement>.";
+  if (result === "SKIP") return "The naming model did not pick a main task. Add an instruction: /session-name-refresh <requirement>.";
+  return "No valid session name was generated.";
+}
+
+type RunOptions = { force?: boolean; hint?: string; manual?: boolean };
 
 function promptFor(state: State, contextLine: string, conversation: string, config: Config, options: RunOptions = {}): string {
   const wantsProgress = config.nameFormat.includes("{progress}");
   const languageRule = config.nameLanguage === "auto"
     ? "Use the primary language of the conversation for the type, topic, and progress."
     : `Write the type, topic, and progress in this language: ${config.nameLanguage}.`;
-  const outputRule = wantsProgress
-    ? '- Output "Type｜Topic｜Progress"; output SKIP only if there is no clear task.'
-    : '- Output "Type｜Topic"; output SKIP only if there is no clear task.';
+  const outputRule = buildOutputRule(Boolean(options.manual), wantsProgress);
   const reuseRule = buildReuseRule(Boolean(options.force), wantsProgress);
   const progressRules = wantsProgress
     ? `\n- Progress states the latest status of the main task (e.g. "published 0.1.1", "fix verified", "待审查"), at most 16 characters. Anchor it to the latest evidence near the END of the conversation; never report an earlier phase when a later milestone has already been reached.`
@@ -276,7 +291,7 @@ async function generate(pi: ExtensionAPI, ctx: ExtensionContext, config: Config,
   const model = selection.model;
   if (!model) return null;
   const conversation = buildConversationText(ctx.sessionManager.getBranch() as Entry[]);
-  if (!conversation) return "SKIP";
+  if (!conversation) return "NO_CONTEXT";
   const configuredLevel = config.thinkingLevel === "inherit" ? (ctx.thinkingLevel ?? "off") : config.thinkingLevel;
   const requestOptions = { sessionId: uuidv7(), cacheRetention: "none" as const, ...thinkingOptions(model, configuredLevel) };
   const contextLine = buildContextLine(Boolean(options.force), state.segments, pi.getSessionName() ?? state.autoName ?? "(unnamed)");
@@ -312,9 +327,9 @@ export default function sessionNamer(pi: ExtensionAPI) {
     running = true;
     if (!manual) attempts++;
     try {
-      const result = await generate(pi, ctx, config, current, options);
+      const result = await generate(pi, ctx, config, current, { ...options, manual });
       const next = { ...current, turnsSinceCheck: 0, history: [...current.history] };
-      if (result && result !== "SKIP") {
+      if (result && typeof result !== "string") {
         const prev = current.segments;
         const taskChanged = !prev || prev.type !== result.type || prev.topic !== result.topic;
         const progressChanged = prev?.progress !== result.progress;
@@ -341,7 +356,7 @@ export default function sessionNamer(pi: ExtensionAPI) {
         if (result === "SKIP") attempts = 0;
         turns = 0;
         persist(next);
-        if (manual) notify(ctx, result === "SKIP" ? "Not enough context to update the session name." : "No valid session name was generated.", result === "SKIP" ? "info" : "warning");
+        if (manual) notify(ctx, missMessage(result), "warning");
       }
     } catch (error) { if (manual) notify(ctx, `Session naming failed: ${error instanceof Error ? error.message : String(error)}`, "error"); }
     finally { running = false; }
