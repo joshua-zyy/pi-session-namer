@@ -144,6 +144,10 @@ test("builds a force context line without feeding back the old segments", () => 
   const forced = buildContextLine(true, segments, "0310｜Fix｜OAuth callback errors｜testing");
   assert.ok(forced.includes("forced re-evaluation"));
   assert.ok(!forced.includes("reuse them EXACTLY"));
+  // A forced re-evaluation must not show the old wording at all: the model copies
+  // what it sees, which is how a wrong first name used to survive a refresh.
+  assert.ok(!forced.includes("OAuth callback errors"));
+  assert.ok(!forced.includes("0310｜"));
   const reused = buildContextLine(false, segments, "ignored");
   assert.ok(reused.includes("reuse them EXACTLY"));
   assert.ok(reused.includes("Fix｜OAuth callback errors"));
