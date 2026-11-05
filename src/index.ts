@@ -224,13 +224,15 @@ function modelFor(ctx: ExtensionContext, config: Config): { model: typeof ctx.mo
 
 // 强制重评时不回灌旧的 type/topic，否则模型会顺着旧值照抄，等于白 force。
 export function buildContextLine(force: boolean, segments: NameSegments | undefined, currentName: string): string {
-  if (force) return `Current name: ${currentName}. The user requested a forced re-evaluation: re-assess the type and topic from the conversation instead of copying the current name.`;
+  // A forced re-evaluation must not see the old wording: the model copies what it
+  // is shown, and the whole point is to escape a first name that turned out wrong.
+  if (force) return "The user requested a forced re-evaluation: describe the current main task from the conversation alone, ignoring any earlier name.";
   if (segments) return `Current type and topic (reuse them EXACTLY as written if they still describe the main task): ${segments.type}｜${segments.topic}`;
   return `Current name: ${currentName}`;
 }
 
 export function buildReuseRule(force: boolean, wantsProgress: boolean): string {
-  if (force) return "- Re-assess the type and topic from scratch. Keep the previous wording only when it is still the most accurate description of the current main task.";
+  if (force) return "- Re-assess the type and topic from scratch, using the conversation alone; do not carry over any earlier name.";
   return wantsProgress
     ? "- If the current name's type and topic still describe the main task, reuse them EXACTLY as written; only the progress may change."
     : "- If the current name's type and topic still describe the main task, output them EXACTLY as written.";
@@ -341,7 +343,6 @@ export default function sessionNamer(pi: ExtensionAPI) {
       return;
     }
     running = true;
-    if (!manual) attempts++;
     try {
       const outcome = await generate(pi, ctx, config, current, { ...options, manual });
       const result = outcome.result;
@@ -370,12 +371,20 @@ export default function sessionNamer(pi: ExtensionAPI) {
         if (manual || !current.autoName) notify(ctx, `Session name updated: ${rendered}`);
         else if (!taskChanged && progressChanged) { /* silent progress update */ }
       } else {
+        // Only a real failure consumes the retry budget. SKIP is a valid answer,
+        // and NO_CONTEXT means there is nothing to analyze yet — counting either
+        // as a failed attempt would stop automatic naming for the rest of the
+        // session (three strikes) over a transient condition.
         if (result === "SKIP") attempts = 0;
+        else if (result !== "NO_CONTEXT" && !manual) attempts++;
         turns = 0;
         persist(next);
         if (manual) notify(ctx, missMessage(result, outcome.errorMessage), "warning");
       }
-    } catch (error) { if (manual) notify(ctx, `Session naming failed: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+    } catch (error) {
+      if (!manual) attempts++;
+      if (manual) notify(ctx, `Session naming failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
     finally { running = false; }
   };
 
